@@ -34,10 +34,7 @@ def parse_search_results(html):
             title = link.text()
             href = link.attr('href')
             if href and href.startswith('/b/'):
-                books.append({
-                    'title': title,
-                    'href': href
-                })
+                books.append({'title': title, 'href': href})
     return books
 
 @bot.message_handler(commands=['start'])
@@ -48,67 +45,43 @@ def send_welcome(message):
 def handle_book_search(message):
     book_name = message.text
     html = get_search_results(book_name)
-    
     if html == 'Не нашлось ни единой книги, удовлетворяющей вашим требованиям.':
         bot.reply_to(message, "Sorry, I couldn't find that book.")
         return
-
     books = parse_search_results(html)[:10]
     if not books:
         bot.reply_to(message, "No books found.")
         return
-
     user_search_results[message.chat.id] = books
-
     markup = types.InlineKeyboardMarkup()
-    for i, book in enumerate(books):
+    for idx, book in enumerate(books):
         btn_text = book['title']
-        count = 0
-        for i in range(0,10):
-            old_text = btn_text
-
-            btn_text = btn_text.replace("(читать)", "")
-            btn_text = btn_text.replace("(fb2)", "")
-            btn_text = btn_text.replace("(epub)", "")
-            btn_text = btn_text.replace("(mobi)", "")
-            btn_text = btn_text.replace("(скачать epub)", "")
-            btn_text = btn_text.replace("(скачать pdf)", "")
-            btn_text = btn_text.replace("(скачать djvu)", "")
-            btn_text = btn_text.replace("  ", ' - ')
-            btn_text = btn_text.replace('  ', ' ')
-            btn_text = btn_text.replace("- -", '-')
-
-        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f'book_{i}'))
-    
+        for pattern in ["(читать)", "(fb2)", "(epub)", "(mobi)", "(скачать epub)", "(скачать pdf)", "(скачать djvu)"]:
+            btn_text = btn_text.replace(pattern, "")
+        btn_text = btn_text.replace("  ", " - ").replace("  ", " ").replace("- -", "-")
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f'book_{idx}'))
     bot.send_message(message.chat.id, "Choose a book:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('book_'))
 def handle_book_selection(call):
     chat_id = call.message.chat.id
     book_index = int(call.data.split('_')[1])
-    
-    if chat_id not in user_search_results:
-        bot.send_message(chat_id, "Search results expired. Please search again.")
+    if chat_id not in user_search_results or book_index < 0 or book_index >= len(user_search_results[chat_id]):
+        bot.send_message(chat_id, "Search results expired or invalid selection. Please search again.")
         return
-
     book = user_search_results[chat_id][book_index]
     book_url = f'http://flibusta.is{book["href"]}/epub'
-    
     try:
         with requests.get(book_url, stream=True) as r:
             r.raise_for_status()
-            book_id_link = book['href'].replace('/b', '')
-            book_id_link = book_id_link.replace('/', '')
+            book_id_link = book['href'].replace('/b', '').replace('/', '')
             temp_path = os.path.join(tempfile.gettempdir(), f"{book_id_link}.epub")
             with open(temp_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-        
         with open(temp_path, 'rb') as f:
             bot.send_document(chat_id, f)
-        
         os.remove(temp_path)
-        
     except Exception as e:
         bot.send_message(chat_id, f"Error downloading book: {str(e)}")
 
