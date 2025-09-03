@@ -3,6 +3,7 @@ import telebot
 from telebot import types
 import requests
 from pyquery import PyQuery as pq
+import tempfile
 
 bot_token = os.getenv('API_KEY_BOT')
 bot = telebot.TeleBot(bot_token)
@@ -16,58 +17,99 @@ RATING = {
     'файл на 5': 5
 }
 
-def get_search_result(book_name, sort):
+user_search_results = {}
+
+def get_search_results(book_name, sort='sd2'):
     payload = {'ab': 'ab1', 't': book_name, 'sort': sort}
     r = requests.get('http://flibusta.is/makebooklist', params=payload)
     return r.text
 
-def fetch_book_id(search_result, sort):
-    doc = pq(search_result)
-    if sort == 'litres':
-        book = [pq(i)('div > a').attr.href for i in doc.find('div') if '[litres]' in pq(i).text().lower()][0]
-    elif sort == 'rating':
-        books = [(pq(i)('div > a').attr.href, pq(i)('img').attr.title) for i in doc.find('div')]
-        book = sorted(books, key=lambda book: RATING[book[1]], reverse=True)[0][0]
-    else:
-        book = doc('div > a').attr.href
-    return book
-
-def get_book_link(book_name, sort, file_format):
-    search_result = get_search_result(book_name, sort)
-    if search_result == 'Не нашлось ни единой книги, удовлетворяющей вашим требованиям.':
-        return 'No result'
-    else:
-        book = fetch_book_id(search_result, sort)
-        link = f'http://flibusta.is{book}/{file_format}'
-        return link
+def parse_search_results(html):
+    doc = pq(html)
+    books = []
+    for div in doc.find('div'):
+        book_element = pq(div)
+        link = book_element('div > a')
+        if link:
+            title = link.text()
+            href = link.attr('href')
+            if href and href.startswith('/b/'):
+                books.append({
+                    'title': title,
+                    'href': href
+                })
+    return books
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, "Welcome! Send me the name of a book and I will find it for you!")
 
-
 @bot.message_handler(func=lambda message: True)
-def echo_all(message):
+def handle_book_search(message):
     book_name = message.text
-    book_link = get_book_link(book_name, 'sd2', 'epub')
-    if book_link == 'No result':
+    html = get_search_results(book_name)
+    
+    if html == 'Не нашлось ни единой книги, удовлетворяющей вашим требованиям.':
         bot.reply_to(message, "Sorry, I couldn't find that book.")
-    else:
-        response = requests.get(book_link, stream=True)
-        if response.status_code == 200:
-            with open('book.epub', 'wb') as f:
-                f.write(response.raw.read())
+        return
 
-        markup = types.InlineKeyboardMarkup()
-        download_button = types.InlineKeyboardButton("Download", callback_data="download")
-        markup.add(download_button)
-        bot.send_message(message.chat.id, "Here is your book", reply_markup=markup)
+    books = parse_search_results(html)[:10]
+    if not books:
+        bot.reply_to(message, "No books found.")
+        return
+
+    user_search_results[message.chat.id] = books
+
+    markup = types.InlineKeyboardMarkup()
+    for i, book in enumerate(books):
+        btn_text = book['title']
+        count = 0
+        for i in range(0,10):
+            old_text = btn_text
+
+            btn_text = btn_text.replace("(читать)", "")
+            btn_text = btn_text.replace("(fb2)", "")
+            btn_text = btn_text.replace("(epub)", "")
+            btn_text = btn_text.replace("(mobi)", "")
+            btn_text = btn_text.replace("(скачать epub)", "")
+            btn_text = btn_text.replace("(скачать pdf)", "")
+            btn_text = btn_text.replace("(скачать djvu)", "")
+            btn_text = btn_text.replace("  ", ' - ')
+            btn_text = btn_text.replace('  ', ' ')
+            btn_text = btn_text.replace("- -", '-')
+
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f'book_{i}'))
+    
+    bot.send_message(message.chat.id, "Choose a book:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('book_'))
+def handle_book_selection(call):
+    chat_id = call.message.chat.id
+    book_index = int(call.data.split('_')[1])
+    
+    if chat_id not in user_search_results:
+        bot.send_message(chat_id, "Search results expired. Please search again.")
+        return
+
+    book = user_search_results[chat_id][book_index]
+    book_url = f'http://flibusta.is{book["href"]}/epub'
+    
+    try:
+        with requests.get(book_url, stream=True) as r:
+            r.raise_for_status()
+            book_id_link = book['href'].replace('/b', '')
+            book_id_link = book_id_link.replace('/', '')
+            temp_path = os.path.join(tempfile.gettempdir(), f"{book_id_link}.epub")
+            with open(temp_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
         
-@bot.callback_query_handler(func=lambda call: call.data == "download")
-def send_book(call):
-    with open('book.epub', 'rb') as book_file:
-        bot.send_document(call.message.chat.id, book_file)
-    os.remove(f'book.epub')
+        with open(temp_path, 'rb') as f:
+            bot.send_document(chat_id, f)
+        
+        os.remove(temp_path)
+        
+    except Exception as e:
+        bot.send_message(chat_id, f"Error downloading book: {str(e)}")
 
 bot.polling()
-
